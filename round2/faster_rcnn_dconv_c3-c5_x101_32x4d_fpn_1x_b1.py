@@ -126,14 +126,14 @@ train_pipeline = [
     dict(type='DefaultFormatBundle'),
     dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels']),
 ]
-test_crop = dict(flag=True, patch_size = (2,2))
+test_crop = dict(flag=False, patch_size = (2,2))
 test_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(
         type='MultiScaleFlipAug',
         # img_scale=[(1024, 425), (1280, 532)],
-        #img_scale=[(2048,900),(1960,861)],
-        img_scale=(2048,950),
+        #img_scale=[(2048,850),(1960,813)],
+        img_scale=(1024,425),
         flip=False,
         transforms=[
             dict(type='Resize', keep_ratio=True),

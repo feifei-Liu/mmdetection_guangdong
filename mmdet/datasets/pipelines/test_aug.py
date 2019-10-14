@@ -50,6 +50,7 @@ class MultiScaleFlipAug(object):
                     _results['flip'] = flip
                     data = self.transforms(_results)
                     aug_data.append(data)
+                    # print(data['img'].shape)
 
         # list of dict to dict of list
         aug_data_dict = {key: [] for key in aug_data[0]}

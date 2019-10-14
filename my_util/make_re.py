@@ -11,6 +11,8 @@ import os
 import numpy as np
 import argparse
 from tqdm import tqdm
+from copy import deepcopy as dcopy
+from easydict import EasyDict as edict
 # def restore(results):
 #     '''
 #
@@ -109,7 +111,6 @@ from tqdm import tqdm
 #     with open(json_out_path, 'w') as fp:
 #         json.dump(meta, fp, cls=MyEncoder, indent=4, separators=(',', ': '))
 
-#线上不裁剪用
 class MyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.integer):
@@ -121,6 +122,7 @@ class MyEncoder(json.JSONEncoder):
         else:
             return super(MyEncoder, self).default(obj)
 
+#线上不裁剪用
 def result_frompic_no_crop():
     config_file = config2make_json
     checkpoint_file = model2make_json
@@ -178,7 +180,7 @@ def result_frompic_val():
     with open(json_out_path, 'w') as fp:
         json.dump(meta, fp, cls=MyEncoder, indent=4, separators=(',', ': '))
 
-def nms(dets,thr=0.5):
+def nms(dets,thr=0.5, mode='iou'):
     # dets:[N,5]
     assert dets.shape[-1] % 5 == 0
     if dets.shape[0] == 1:
@@ -197,7 +199,13 @@ def nms(dets,thr=0.5):
         w = np.maximum(0.0, xx2 - xx1 + 1)
         h = np.maximum(0.0, yy2 - yy1 + 1)
         inter = w * h
-        ovr = inter / (areas[i] + areas[orders[1:]] - inter)
+        if mode == 'iou':
+            ovr = inter / (areas[i] + areas[orders[1:]] - inter)
+        elif mode == 'iof':
+            arr_areas = dcopy(areas[orders[1:]])
+            arr_areas[arr_areas > areas[i]] = areas[i]
+            ovr = inter / arr_areas
+#        ovr = inter / (areas[i] + areas[orders[1:]] - inter)
         inds = np.where(ovr <= thr)[0]
         orders = orders[inds + 1]
     return keep
@@ -215,6 +223,11 @@ def gen_commit_result_round2_down(pic_path):
 
     result = []
     for img_name in tqdm(img_list):
+        model.cfg.data.test.pipeline[1].img_scale = (2048, 850)
+        model.cfg.test_cfg.rcnn.score_thr = 0.05
+
+        model.cfg.data.test.pipeline[1].flip = False
+
         t1 = time.time()
         full_img = os.path.join(pic_path, img_name)
         full_img = mmcv.imread(full_img)
@@ -225,7 +238,15 @@ def gen_commit_result_round2_down(pic_path):
         for patch_idx, patch in enumerate(patches):
             patch_img = full_img[patch[1]:patch[3],patch[0]:patch[2]]
             predicts.append(inference_detector(model, patch_img))
+
+#        model.cfg.data.test.pipeline[1].img_scale = [(2048,850)]
+        # model.cfg.data.test.pipeline[1].img_scale = (2048,850)
+        # model.cfg.test_cfg.rcnn.score_thr = 0.05
+
+        # model.cfg.data.test.pipeline[1].flip = True
+
         predicts.append(inference_detector(model, full_img))
+
         for i, (bboxes1, bboxes2,bboxes3,bboxes4,bboxes5) in enumerate(zip(predicts[0], predicts[1],predicts[2],predicts[3],predicts[4])):
 
             bboxes1[:,:4] += np.tile(patches[0][:2], 2)
@@ -233,9 +254,17 @@ def gen_commit_result_round2_down(pic_path):
             bboxes3[:,:4] += np.tile(patches[2][:2], 2)
             bboxes4[:,:4] += np.tile(patches[3][:2], 2)
             merge_bboxes = np.concatenate([bboxes1, bboxes2,bboxes3,bboxes4,bboxes5], axis=0)
+
+            #if i+1 in [5, 6, 9, 10, 11, 14, 13,15]: # only 
+            #    merge_bboxes =  bboxes5
+
             # print("merged:",merge_bboxes)
             if merge_bboxes.size:
-                keep_inds = nms(merge_bboxes,thr=0.5)
+                #iof_classes = [5, 6, 8, 9, 10, 11, 14, 15]
+                #if i + 1 == iof_classes:
+                #    keep_inds = nms(merge_bboxes,thr=0.7,   mode='iof')
+                #else:
+                keep_inds = nms(merge_bboxes,thr=0.5,   mode='iou')
                 merge_bboxes = merge_bboxes[keep_inds].reshape(-1,5)
                 defect_label = i + 1
                 image_name = img_name
@@ -327,6 +356,49 @@ def gen_commit_result_round2(pic_path):
     with open(json_out_path, 'w') as fp:
         json.dump(result, fp, indent=4, separators=(',', ': '))
 
+def result_frompic_val_dirs():
+    config_file = config2make_json
+    checkpoint_file = model2make_json
+
+    # build the model from a config file and a checkpoint file
+    model = init_detector(config_file, checkpoint_file, device='cuda:0')
+    dirs = os.listdir(pic_path)
+    meta = []
+    for dir in dirs:
+        t1 = time.time()
+        root = os.path.join(pic_path,dir)
+        im_name = dir+'.jpg'
+        img = os.path.join(root, im_name)
+
+        if flag_template:
+            template_img_name = "template"+'_'+dir.split('_')[0]+'.jpg'
+            template_img = os.path.join(root,template_img_name)
+            temp_img = mmcv.imread(img)-mmcv.imread(template_img)
+        result_ = inference_detector(model, img)
+        for i ,boxes in enumerate(result_,1):
+            if len(boxes):
+                defect_label = i
+                for box in boxes:
+                    anno = {}
+                    anno['name'] = im_name
+                    anno['category'] = defect_label
+                    anno['bbox'] = [round(float(i), 2) for i in box[0:4]]
+                    anno['score'] = float(box[4])
+                    if flag_template:
+                        box_temp = temp_img[int(anno['bbox'][1]):int(anno['bbox'][3]),int(anno['bbox'][0]):int(anno['bbox'][2]),:]
+                        area = (anno['bbox'][3]-anno['bbox'][1])*(anno['bbox'][2]-anno['bbox'][0])
+                        percen = len(np.where(box_temp>1)[0])/float(area)/3
+                        print(percen)
+                        if percen > 0.5:
+                            meta.append(anno)
+                        else:
+                            print("不满足要求 %d"%percen)
+                    else:
+                        meta.append(anno)
+        t2 = time.time()
+        print("time one im ",str(t2-t1))
+    with open(json_out_path, 'w') as fp:
+        json.dump(meta, fp, cls=MyEncoder, indent=4, separators=(',', ': '))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -358,19 +430,27 @@ if __name__ == "__main__":
         help="Save path",
         type=str,
     )
+    parser.add_argument(
+        "-temp","--flag_template",
+        default=True,
+        help="flag use_template",
+        type=bool,
+    )
     args = parser.parse_args()
     model2make_json = args.model
     config2make_json = args.config
     json_out_path = args.out
+    flag_template = args.flag_template
     if args.phase == 'test':
         pic_path = "/home/zhangming/Models/Results/cloth_flaw_detection/Datasets_2/guangdong1_round2_train_part1_20190924/defect/"
     # else:
     if args.phase == "val":
-        pic_path = "/home/zhangming/Models/Results/cloth_flaw_detection/Datasets_2/val_925/"
+        pic_path = "/home/zhangming/Models/Results/cloth_flaw_detection/Datasets_2/guangdong1_round2_train_part1_20190924/defect/"
+        #pic_path = "/home/zhangming/Models/Results/cloth_flaw_detection/Datasets_2/val_925/"
 
-    flag = 3
+    flag = 4
 
-    if flag == 0: # 本地测试集
+    if flag == 0: # 线下不裁剪测试
         result_frompic_val()
     if flag == 1:# 线上不裁剪测试
         result_frompic_no_crop()
@@ -378,6 +458,8 @@ if __name__ == "__main__":
         gen_commit_result_round2(pic_path)
     if flag == 3: # 线下裁剪测试
         gen_commit_result_round2_down(pic_path)
+    if flag == 4: # 线下不裁剪测试按文件夹(数据集格式和线上一样)
+        result_frompic_val_dirs()
 
 # python my_util/make_re.py -p val -m workdir/XXX -c round2/XXX -o results/result_XXX.json
 
